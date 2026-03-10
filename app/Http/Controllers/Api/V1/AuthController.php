@@ -76,6 +76,7 @@ class AuthController extends Controller
             'email' => $request->email,
             'password' => Hash::make($request->password),
             'role' => $request->role ?? 'learner',
+            'is_active' => true,
             'last_login_at' => now(),
         ]);
 
@@ -182,6 +183,7 @@ class AuthController extends Controller
                 'name' => $name,
                 'email' => $email,
                 'role' => $request->role ?? 'learner',
+                'is_active' => true,
                 'email_verified_at' => now(),
                 'last_login_at' => now(),
                 $socialField => $firebaseUid,
@@ -238,6 +240,7 @@ class AuthController extends Controller
                 'name' => $name,
                 'email' => $request->email,
                 'role' => $request->role ?? 'learner',
+                'is_active' => true,
                 'date_of_birth' => $request->date_of_birth,
                 'email_verified_at' => now(),
                 'last_login_at' => now(),
@@ -485,6 +488,7 @@ class AuthController extends Controller
             'email' => $email,
             $socialField => $socialId,
             'role' => 'learner',
+            'is_active' => true,
             'email_verified_at' => now(),
             'last_login_at' => now(),
         ]);
