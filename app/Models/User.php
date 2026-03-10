@@ -90,6 +90,11 @@ class User extends Authenticatable
         return $this->role === UserRole::Learner;
     }
 
+    public function isStudyUser(): bool
+    {
+        return $this->role->isStudyUser();
+    }
+
     // ──────────────────────────────────────────────
     // Permission helpers (for admins)
     // ──────────────────────────────────────────────
