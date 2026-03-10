@@ -244,14 +244,14 @@ class MigrateData extends Command
 
         foreach ($profiles as $profile) {
             $roleMap = [
-                'admin' => UserRole::SUPER_ADMIN,
-                'moderator' => UserRole::ADMIN,
-                'user' => UserRole::LEARNER,
-                'child' => UserRole::CHILD,
-                'parent' => UserRole::PARENT,
+                'admin' => UserRole::SuperAdmin,
+                'moderator' => UserRole::Admin,
+                'user' => UserRole::Learner,
+                'child' => UserRole::Child,
+                'parent' => UserRole::Parent,
             ];
 
-            $role = $roleMap[$profile->role] ?? UserRole::LEARNER;
+            $role = $roleMap[$profile->role] ?? UserRole::Learner;
             $newUuid = Str::uuid()->toString();
 
             $data = [
@@ -307,7 +307,7 @@ class MigrateData extends Command
                             'name' => $child->name ?: DB::raw('name'),
                             'school_level' => $child->level ?? $child->school_level ?? null,
                             'date_of_birth' => $child->date_of_birth ?? null,
-                            'role' => UserRole::CHILD->value,
+                            'role' => UserRole::Child->value,
                         ]);
                 }
             }
@@ -326,7 +326,7 @@ class MigrateData extends Command
                 if (!$this->dryRun) {
                     DB::table('users')
                         ->where('id', $this->userMap[$parent->user_id])
-                        ->update(['role' => UserRole::PARENT->value]);
+                        ->update(['role' => UserRole::Parent->value]);
                 }
             }
         }
