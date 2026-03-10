@@ -125,6 +125,13 @@
                     <p class="px-3 mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">System</p>
                 </div>
 
+                {{-- AdMob --}}
+                @if(auth()->user()->hasPermission('manage_settings'))
+                <x-admin.nav-link href="{{ route('admin.admob.index') }}" :active="request()->routeIs('admin.admob.*')" icon="megaphone">
+                    AdMob Ads
+                </x-admin.nav-link>
+                @endif
+
                 {{-- Settings --}}
                 @if(auth()->user()->hasPermission('manage_settings'))
                 <x-admin.nav-link href="{{ route('admin.settings.index') }}" :active="request()->routeIs('admin.settings.*')" icon="cog">

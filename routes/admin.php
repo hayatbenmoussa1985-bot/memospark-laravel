@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Admin\AdmobController;
 use App\Http\Controllers\Admin\AnalyticsController;
 use App\Http\Controllers\Admin\AuditLogController;
 use App\Http\Controllers\Admin\BlogController;
@@ -113,6 +114,14 @@ Route::middleware('permission:manage_notifications')->prefix('notifications')->n
 // ══════════════════════════════════════════════
 Route::middleware('permission:view_analytics')->prefix('analytics')->name('analytics.')->group(function () {
     Route::get('/', [AnalyticsController::class, 'index'])->name('index');
+});
+
+// ══════════════════════════════════════════════
+// AdMob / Ads (permission: manage_settings)
+// ══════════════════════════════════════════════
+Route::middleware('permission:manage_settings')->prefix('ads/admob')->name('admob.')->group(function () {
+    Route::get('/', [AdmobController::class, 'index'])->name('index');
+    Route::put('/', [AdmobController::class, 'update'])->name('update');
 });
 
 // ══════════════════════════════════════════════

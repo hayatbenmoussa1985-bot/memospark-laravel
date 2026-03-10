@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\V1\AdConfigController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BadgeController;
 use App\Http\Controllers\Api\V1\CardController;
@@ -38,6 +39,9 @@ Route::prefix('v1')->group(function () {
         Route::post('/social/google', [AuthController::class, 'socialGoogle']);
         Route::post('/social/apple', [AuthController::class, 'socialApple']);
     });
+
+    // Ad config (public — called by mobile app before auth)
+    Route::get('/config/ads', [AdConfigController::class, 'getConfig']);
 
     // n8n Webhook (secured via X-API-Key header, not Sanctum)
     Route::post('/webhooks/n8n', [WebhookController::class, 'n8n']);
