@@ -15,7 +15,7 @@ set -e
 
 DEPLOY_DIR="/home/yaku4132/memospark-laravel"
 PUBLIC_DIR="${DEPLOY_DIR}/public"
-REPO_URL="https://github.com/YOUR_USERNAME/memospark-laravel.git"
+REPO_URL="https://github.com/hayatbenmoussa1985-bot/memospark-laravel.git"
 BRANCH="main"
 PHP_BIN="/usr/local/bin/php"  # Adjust for o2switch PHP version
 

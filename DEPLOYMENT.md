@@ -39,7 +39,7 @@ ssh memospark
 
 # Clone the repository
 cd /home/yaku4132
-git clone https://github.com/YOUR_USERNAME/memospark-laravel.git
+git clone https://github.com/hayatbenmoussa1985-bot/memospark-laravel.git
 cd memospark-laravel
 
 # Install dependencies
