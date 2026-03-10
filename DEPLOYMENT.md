@@ -112,31 +112,9 @@ Wait for DNS propagation (up to 48h), then decommission Vercel.
 
 ---
 
-## Step 5: Data Migration (PostgreSQL → MySQL)
+## Step 5: Verify Deployment
 
 ```bash
-# Set OLD_PG_* variables in .env (already in .env.production template)
-
-# Preview what will be migrated
-php artisan app:migrate-data --dry-run
-
-# Run the full migration
-php artisan app:migrate-data
-
-# Verify data integrity
-php artisan app:verify-migration
-```
-
-After verification, remove the `OLD_PG_*` variables from `.env`.
-
----
-
-## Step 6: Post-Migration Cleanup
-
-```bash
-# Remove old PostgreSQL connection from .env
-# The old_pgsql config in database.php can stay (it does nothing without env vars)
-
 # Run post-deploy checks
 php artisan app:post-deploy
 

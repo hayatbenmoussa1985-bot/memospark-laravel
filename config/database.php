@@ -97,30 +97,6 @@ return [
             'sslmode' => 'prefer',
         ],
 
-        /*
-        |--------------------------------------------------------------------------
-        | Old PostgreSQL Source (for data migration only)
-        |--------------------------------------------------------------------------
-        |
-        | Connection to the old MemoSpark PostgreSQL database on o2switch.
-        | Used by the app:migrate-data command to pull data into MySQL.
-        | Set OLD_PG_* env vars before running the migration.
-        |
-        */
-        'old_pgsql' => [
-            'driver' => 'pgsql',
-            'host' => env('OLD_PG_HOST', '127.0.0.1'),
-            'port' => env('OLD_PG_PORT', '5432'),
-            'database' => env('OLD_PG_DATABASE', 'yaku4132_memo1514'),
-            'username' => env('OLD_PG_USERNAME', 'yaku4132_memousp561'),
-            'password' => env('OLD_PG_PASSWORD', ''),
-            'charset' => 'utf8',
-            'prefix' => '',
-            'prefix_indexes' => true,
-            'search_path' => 'public',
-            'sslmode' => 'prefer',
-        ],
-
         'sqlsrv' => [
             'driver' => 'sqlsrv',
             'url' => env('DB_URL'),

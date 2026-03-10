@@ -86,8 +86,7 @@ if [ "$1" = "--init" ]; then
     echo "Next steps:"
     echo "  1. Edit .env with your MySQL password and other credentials"
     echo "  2. Create symlinks for domains (see DEPLOYMENT.md)"
-    echo "  3. Run: php artisan app:migrate-data (if migrating from PostgreSQL)"
-    echo "  4. Run: php artisan app:verify-migration"
+    echo "  3. Run: php artisan app:post-deploy"
     exit 0
 fi
 
