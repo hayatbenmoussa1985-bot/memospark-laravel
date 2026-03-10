@@ -120,7 +120,7 @@ class Deck extends Model
     public function favoritedBy(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'deck_favorites')
-            ->withTimestamps();
+            ->withPivot('created_at');
     }
 
     /**

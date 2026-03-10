@@ -189,7 +189,7 @@ class User extends Authenticatable
     public function favoriteDecks(): BelongsToMany
     {
         return $this->belongsToMany(Deck::class, 'deck_favorites')
-            ->withTimestamps();
+            ->withPivot('created_at');
     }
 
     /**
@@ -198,8 +198,7 @@ class User extends Authenticatable
     public function badges(): BelongsToMany
     {
         return $this->belongsToMany(Badge::class, 'user_badges')
-            ->withPivot('awarded_by', 'awarded_at')
-            ->withTimestamps();
+            ->withPivot('awarded_by', 'awarded_at');
     }
 
     /**
@@ -284,8 +283,7 @@ class User extends Authenticatable
     public function children(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'parent_child', 'parent_id', 'child_id')
-            ->withPivot('relationship', 'permissions')
-            ->withTimestamps();
+            ->withPivot('relationship', 'permissions', 'created_at');
     }
 
     /**
