@@ -943,9 +943,11 @@ class MigrateData extends Command
 
             $count = 0;
             foreach ($messages as $msg) {
-                // Messages may reference profile IDs or user IDs
-                $senderId = $this->profileToUserMap[$msg->sender_id] ?? ($this->oldUserToNewMap[$msg->sender_id] ?? null);
-                $receiverId = $this->profileToUserMap[$msg->receiver_id] ?? ($this->oldUserToNewMap[$msg->receiver_id] ?? null);
+                // Messages use sender_profile_id / receiver_profile_id
+                $senderKey = $msg->sender_profile_id ?? $msg->sender_id ?? null;
+                $receiverKey = $msg->receiver_profile_id ?? $msg->receiver_id ?? null;
+                $senderId = $senderKey ? ($this->profileToUserMap[$senderKey] ?? null) : null;
+                $receiverId = $receiverKey ? ($this->profileToUserMap[$receiverKey] ?? null) : null;
 
                 if (!$senderId || !$receiverId || $this->dryRun) continue;
 
@@ -975,7 +977,8 @@ class MigrateData extends Command
             $count = 0;
 
             foreach ($notifs as $n) {
-                $userId = $this->profileToUserMap[$n->profile_id ?? ''] ?? ($this->oldUserToNewMap[$n->user_id ?? 0] ?? null);
+                $profileId = $n->profile_id ?? null;
+                $userId = $profileId ? ($this->profileToUserMap[$profileId] ?? null) : null;
                 if (!$userId || $this->dryRun) continue;
 
                 DB::table('notifications')->insert([
@@ -1027,12 +1030,20 @@ class MigrateData extends Command
                     $deckId = $this->deckMap[$log->deck_id] ?? null;
                 }
 
+                // Convert duration_seconds to duration_minutes
+                $durationMinutes = null;
+                if (isset($log->duration_seconds) && $log->duration_seconds) {
+                    $durationMinutes = (int) ceil($log->duration_seconds / 60);
+                } elseif (isset($log->duration_minutes)) {
+                    $durationMinutes = $log->duration_minutes;
+                }
+
                 DB::table('activity_logs')->insert([
                     'user_id' => $userId,
                     'activity_type' => $log->activity_type ?? $log->type ?? 'study',
                     'deck_id' => $deckId,
                     'metadata' => isset($log->metadata) ? (is_string($log->metadata) ? $log->metadata : json_encode($log->metadata)) : null,
-                    'duration_minutes' => $log->duration_minutes ?? $log->duration ?? null,
+                    'duration_minutes' => $durationMinutes,
                     'cards_reviewed' => $log->cards_reviewed ?? null,
                     'success_rate' => $log->success_rate ?? null,
                     'created_at' => $log->created_at,
