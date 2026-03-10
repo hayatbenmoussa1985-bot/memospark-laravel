@@ -102,7 +102,7 @@ class AuthController extends Controller
             'firebase_uid' => 'nullable|string',
             'email' => 'nullable|email',
             'name' => 'nullable|string|max:255',
-            'role' => 'nullable|in:parent,learner',
+            'role' => 'nullable|in:parent,child,learner',
         ]);
 
         // Decode the Firebase JWT to extract user info
@@ -220,7 +220,7 @@ class AuthController extends Controller
             'first_name' => 'required|string|max:255',
             'last_name' => 'nullable|string|max:255',
             'date_of_birth' => 'nullable|date',
-            'role' => 'nullable|in:parent,learner',
+            'role' => 'nullable|in:parent,child,learner',
         ]);
 
         $name = trim($request->first_name . ' ' . ($request->last_name ?? ''));
