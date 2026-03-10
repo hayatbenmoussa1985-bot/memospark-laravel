@@ -108,12 +108,12 @@ class PostDeploy extends Command
 
         // Check pending migrations
         try {
-            $pending = count(app('migrator')->pendingMigrations(
-                app('migrator')->getMigrationFiles(database_path('migrations'))
-            ));
+            $exitCode = \Illuminate\Support\Facades\Artisan::call('migrate:status', [], new \Symfony\Component\Console\Output\BufferedOutput());
+            $output = \Illuminate\Support\Facades\Artisan::output();
+            $pendingCount = substr_count($output, 'Pending');
 
-            if ($pending > 0) {
-                $this->warn("  ✗ {$pending} pending migration(s) — run: php artisan migrate");
+            if ($pendingCount > 0) {
+                $this->warn("  ✗ {$pendingCount} pending migration(s) — run: php artisan migrate");
                 $issues++;
             } else {
                 $this->info('  ✓ All migrations are up to date');
