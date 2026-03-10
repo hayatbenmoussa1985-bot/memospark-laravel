@@ -55,7 +55,7 @@ class AdConfigController extends Controller
     }
 
     /**
-     * Build the ad config for a specific platform.
+     * Build the ad config (returns both platforms in nested format for mobile app).
      */
     private function buildConfig(string $platform): array
     {
@@ -66,16 +66,26 @@ class AdConfigController extends Controller
             return $this->getFallbackConfig($platform);
         }
 
-        $platformConfig = $dbConfig[$platform] ?? [];
+        $androidConfig = $dbConfig['android'] ?? [];
+        $iosConfig = $dbConfig['ios'] ?? [];
 
         return [
             'enabled' => (bool) ($dbConfig['enabled'] ?? false),
             'publisherId' => $dbConfig['publisher_id'] ?? '',
-            'appId' => $platformConfig['app_id'] ?? '',
-            'bannerId' => $platformConfig['banner_id'] ?? '',
-            'interstitialId' => $platformConfig['interstitial_id'] ?? '',
-            'rewardedId' => $platformConfig['rewarded_id'] ?? '',
-            'nativeId' => $platformConfig['native_id'] ?? '',
+            'android' => [
+                'appId' => $androidConfig['app_id'] ?? '',
+                'bannerId' => $androidConfig['banner_id'] ?? '',
+                'interstitialId' => $androidConfig['interstitial_id'] ?? '',
+                'rewardedId' => $androidConfig['rewarded_id'] ?? '',
+                'nativeId' => $androidConfig['native_id'] ?? '',
+            ],
+            'ios' => [
+                'appId' => $iosConfig['app_id'] ?? '',
+                'bannerId' => $iosConfig['banner_id'] ?? '',
+                'interstitialId' => $iosConfig['interstitial_id'] ?? '',
+                'rewardedId' => $iosConfig['rewarded_id'] ?? '',
+                'nativeId' => $iosConfig['native_id'] ?? '',
+            ],
             'frequency' => [
                 'interstitial_every_n_sessions' => (int) ($dbConfig['frequency']['interstitial_every_n_sessions'] ?? 3),
                 'min_time_between_ads_seconds' => (int) ($dbConfig['frequency']['min_time_between_ads_seconds'] ?? 180),
@@ -90,20 +100,27 @@ class AdConfigController extends Controller
     }
 
     /**
-     * Fallback config using Google Test Ad Unit IDs.
+     * Fallback config using Google Test Ad Unit IDs (both platforms).
      */
     private function getFallbackConfig(string $platform): array
     {
-        $test = self::TEST_ADS[$platform];
-
         return [
             'enabled' => false,
             'publisherId' => '',
-            'appId' => $test['app_id'],
-            'bannerId' => $test['banner_id'],
-            'interstitialId' => $test['interstitial_id'],
-            'rewardedId' => $test['rewarded_id'],
-            'nativeId' => $test['native_id'],
+            'android' => [
+                'appId' => self::TEST_ADS['android']['app_id'],
+                'bannerId' => self::TEST_ADS['android']['banner_id'],
+                'interstitialId' => self::TEST_ADS['android']['interstitial_id'],
+                'rewardedId' => self::TEST_ADS['android']['rewarded_id'],
+                'nativeId' => self::TEST_ADS['android']['native_id'],
+            ],
+            'ios' => [
+                'appId' => self::TEST_ADS['ios']['app_id'],
+                'bannerId' => self::TEST_ADS['ios']['banner_id'],
+                'interstitialId' => self::TEST_ADS['ios']['interstitial_id'],
+                'rewardedId' => self::TEST_ADS['ios']['rewarded_id'],
+                'nativeId' => self::TEST_ADS['ios']['native_id'],
+            ],
             'frequency' => [
                 'interstitial_every_n_sessions' => 3,
                 'min_time_between_ads_seconds' => 180,

@@ -37,9 +37,12 @@ return Application::configure(basePath: dirname(__DIR__))
             'force_json' => \App\Http\Middleware\ForceJsonResponse::class,
         ]);
 
-        // Apply ForceJsonResponse to all API routes
+        // Apply ForceJsonResponse + WrapApiResponse to all API routes
         $middleware->prependToGroup('api', [
             \App\Http\Middleware\ForceJsonResponse::class,
+        ]);
+        $middleware->appendToGroup('api', [
+            \App\Http\Middleware\WrapApiResponse::class,
         ]);
 
         // Sanctum stateful domains for SPA (if needed later)
