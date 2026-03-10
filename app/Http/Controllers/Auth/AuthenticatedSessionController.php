@@ -28,7 +28,20 @@ class AuthenticatedSessionController extends Controller
 
         $request->session()->regenerate();
 
-        return redirect()->intended(route('dashboard', absolute: false));
+        $user = $request->user();
+
+        // Redirect admin/super_admin to admin dashboard
+        if ($user->isSuperAdmin() || $user->isAdmin()) {
+            return redirect()->intended(route('admin.dashboard', absolute: false));
+        }
+
+        // Redirect parents to parent dashboard
+        if ($user->isParent()) {
+            return redirect()->intended(route('user.parent.dashboard', absolute: false));
+        }
+
+        // Default: learner/child → user dashboard
+        return redirect()->intended(route('user.dashboard', absolute: false));
     }
 
     /**
