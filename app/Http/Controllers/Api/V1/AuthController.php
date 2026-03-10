@@ -60,8 +60,9 @@ class AuthController extends Controller
             'first_name' => 'nullable|string|max:255',
             'last_name' => 'nullable|string|max:255',
             'email' => 'required|email|unique:users,email',
-            'password' => ['required', 'confirmed', Password::min(8)],
-            'role' => 'sometimes|in:parent,learner',
+            'password' => ['required', Password::min(8)],
+            'password_confirmation' => 'nullable|string',
+            'role' => 'sometimes|in:parent,child,learner',
         ]);
 
         // Accept multiple name formats for backward compatibility
