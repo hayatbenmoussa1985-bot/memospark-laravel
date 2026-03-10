@@ -346,27 +346,36 @@ class AuthController extends Controller
 
     /**
      * POST /api/v1/auth/change-password
+     * Mobile sends { oldPassword, newPassword } or { current_password, password, password_confirmation }
      */
     public function changePassword(Request $request): JsonResponse
     {
-        $request->validate([
-            'current_password' => 'nullable|string',
-            'oldPassword' => 'nullable|string',
-            'password' => ['required', 'confirmed', Password::min(8)],
-        ]);
+        // Accept both field name styles
+        $currentPassword = $request->current_password ?? $request->oldPassword ?? $request->old_password;
+        $newPassword = $request->password ?? $request->newPassword ?? $request->new_password;
+        $confirmPassword = $request->password_confirmation ?? $request->newPassword ?? $request->new_password;
+
+        if (!$newPassword) {
+            return response()->json([
+                'message' => 'New password is required.',
+            ], 422);
+        }
+
+        if (strlen($newPassword) < 8) {
+            return response()->json([
+                'message' => 'Password must be at least 8 characters.',
+            ], 422);
+        }
 
         $user = $request->user();
 
-        // Accept both field names for backward compatibility
-        $currentPassword = $request->current_password ?? $request->oldPassword;
-
-        if ($currentPassword && !Hash::check($currentPassword, $user->password)) {
+        if ($currentPassword && $user->password && !Hash::check($currentPassword, $user->password)) {
             return response()->json([
                 'message' => 'Current password is incorrect.',
             ], 422);
         }
 
-        $user->update(['password' => Hash::make($request->password)]);
+        $user->update(['password' => Hash::make($newPassword)]);
 
         return response()->json([
             'message' => 'Password changed successfully.',
@@ -482,18 +491,30 @@ class AuthController extends Controller
 
     /**
      * Format user data for API response.
+     * Includes ALL fields expected by both mobile User type and web.
      */
     private function formatUser(User $user): array
     {
+        // Split name into first/last for mobile compatibility
+        $nameParts = explode(' ', $user->name ?? '', 2);
+        $firstName = $nameParts[0] ?? '';
+        $lastName = $nameParts[1] ?? '';
+
         return [
             'id' => $user->id,
             'uuid' => $user->uuid,
             'name' => $user->name,
+            'full_name' => $user->name,
+            'first_name' => $firstName,
+            'last_name' => $lastName,
             'email' => $user->email,
             'role' => $user->role->value,
+            'status' => $user->is_active ? 'active' : 'suspended',
             'locale' => $user->locale,
+            'preferred_language' => $user->locale,
             'timezone' => $user->timezone,
             'avatar_path' => $user->avatar_path,
+            'avatar_url' => $user->avatar_path,
             'date_of_birth' => $user->date_of_birth?->toDateString(),
             'school_level' => $user->school_level,
             'is_active' => $user->is_active,
@@ -504,6 +525,7 @@ class AuthController extends Controller
             'has_active_subscription' => $user->hasActiveSubscription(),
             'premium_expires_at' => $user->activeSubscription()?->current_period_end?->toIso8601String(),
             'created_at' => $user->created_at->toIso8601String(),
+            'updated_at' => $user->updated_at?->toIso8601String(),
         ];
     }
 }
