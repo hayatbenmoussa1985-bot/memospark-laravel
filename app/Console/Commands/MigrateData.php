@@ -11,11 +11,19 @@ use Illuminate\Support\Str;
 /**
  * Migrate data from old PostgreSQL database to new MySQL database.
  *
- * Old schema: UUID-based PostgreSQL (Supabase/Neon on o2switch)
- * New schema: BIGINT AI + UUID columns on MySQL
+ * Old schema (PostgreSQL on o2switch):
+ *   - users: id, name, email, password
+ *   - profiles: id (UUID), user_id → users.id, role, first_name, last_name, etc.
+ *   - decks: id (UUID), profile_id → profiles.id, title, description, etc.
+ *   - cards: id (UUID), deck_id → decks.id, question, answer, etc.
+ *   - card_reviews: id, card_id, profile_id, quality, easiness, interval, etc.
+ *   - badges, profile_badges, messages, notifications, activity_logs, etc.
  *
- * Mapping table: uuid_mappings stores old_uuid → new_id + new_uuid
- * for iOS app transition.
+ * New schema (MySQL):
+ *   - users: id (BIGINT AI), uuid, name, email, role, etc.
+ *   - decks: id (BIGINT AI), uuid, user_id, title, etc.
+ *   - cards: id (BIGINT AI), uuid, deck_id, front_text, back_text, etc.
+ *   - card_progress: user_id, card_id, easiness_factor, interval_days, etc.
  *
  * Usage:
  *   php artisan app:migrate-data                    # Run all steps
@@ -33,16 +41,16 @@ class MigrateData extends Command
     protected $description = 'Migrate data from old PostgreSQL database to new MySQL database';
 
     /**
-     * UUID → new ID mapping cache (populated during migration).
+     * ID mapping caches (populated during migration).
+     * Key = old ID (UUID string or integer), Value = new BIGINT ID.
      */
-    private array $userMap = [];       // old_uuid => new_id
-    private array $deckMap = [];       // old_uuid => new_id
-    private array $cardMap = [];       // old_uuid => new_id
-    private array $badgeMap = [];      // old_uuid => new_id
-    private array $childMap = [];      // old_child_uuid => new_user_id
-    private array $parentMap = [];     // old_parent_uuid => new_user_id (profile user_id)
-    private array $categoryMap = [];   // old_uuid => new_id
-    private array $folderMap = [];     // old_uuid => new_id
+    private array $profileToUserMap = [];  // old profiles.id (UUID) => new users.id
+    private array $oldUserToNewMap = [];   // old users.id (int) => new users.id
+    private array $deckMap = [];           // old decks.id (UUID) => new decks.id
+    private array $cardMap = [];           // old cards.id (UUID) => new cards.id
+    private array $badgeMap = [];          // old badges.id => new badges.id
+    private array $categoryMap = [];       // category slug => new categories.id
+    private array $folderMap = [];         // old folders.id => new folders.id
 
     private bool $dryRun = false;
 
@@ -94,7 +102,6 @@ class MigrateData extends Command
                 $this->runStep($name, $method);
             }
         } elseif (isset($steps[$step])) {
-            // Rebuild ID maps from uuid_mappings table before running a single step
             $this->rebuildMapsFromMappingTable();
             $this->runStep($step, $steps[$step]);
         } else {
@@ -144,7 +151,7 @@ class MigrateData extends Command
         DB::statement("
             CREATE TABLE IF NOT EXISTS uuid_mappings (
                 id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                old_uuid CHAR(36) NOT NULL,
+                old_uuid VARCHAR(255) NOT NULL,
                 old_table VARCHAR(100) NOT NULL,
                 new_table VARCHAR(100) NOT NULL,
                 new_id BIGINT UNSIGNED NOT NULL,
@@ -166,16 +173,19 @@ class MigrateData extends Command
             'card_progress', 'messages', 'notifications', 'user_badges',
             'deck_favorites', 'deck_folder', 'folders', 'cards', 'decks',
             'parent_child', 'subscriptions', 'admin_permissions', 'badges',
-            'categories', 'subscription_plans', 'users',
+            'categories',
         ];
 
         foreach ($tables as $table) {
             try {
                 DB::table($table)->truncate();
             } catch (\Exception $e) {
-                // Table might not exist yet, skip
+                // Table might not exist yet
             }
         }
+
+        // Delete all users except the seeded super admin
+        DB::table('users')->where('email', '!=', 'admin@memospark.net')->delete();
 
         DB::statement('SET FOREIGN_KEY_CHECKS=1');
         $this->info('  Done.');
@@ -188,19 +198,16 @@ class MigrateData extends Command
 
         foreach ($mappings as $m) {
             match ($m->old_table) {
-                'profiles' => $this->userMap[$m->old_uuid] = $m->new_id,
-                'children' => $this->childMap[$m->old_uuid] = $m->new_id,
-                'parents' => $this->parentMap[$m->old_uuid] = $m->new_id,
+                'profiles' => $this->profileToUserMap[$m->old_uuid] = $m->new_id,
                 'decks' => $this->deckMap[$m->old_uuid] = $m->new_id,
                 'cards' => $this->cardMap[$m->old_uuid] = $m->new_id,
                 'badges' => $this->badgeMap[$m->old_uuid] = $m->new_id,
-                'categories' => $this->categoryMap[$m->old_uuid] = $m->new_id,
-                'library_folders' => $this->folderMap[$m->old_uuid] = $m->new_id,
+                'folders' => $this->folderMap[$m->old_uuid] = $m->new_id,
                 default => null,
             };
         }
 
-        $this->info("Rebuilt maps: " . count($this->userMap) . " users, "
+        $this->info("Rebuilt maps: " . count($this->profileToUserMap) . " users, "
             . count($this->deckMap) . " decks, "
             . count($this->cardMap) . " cards");
     }
@@ -211,18 +218,23 @@ class MigrateData extends Command
         $this->info("━━━ Step: {$name} ━━━");
         $start = microtime(true);
 
-        $this->$method();
+        try {
+            $this->$method();
+        } catch (\Exception $e) {
+            $this->error("  ✗ Error: " . $e->getMessage());
+            $this->error("  File: " . $e->getFile() . ":" . $e->getLine());
+        }
 
         $duration = round(microtime(true) - $start, 2);
         $this->info("  Completed in {$duration}s");
     }
 
-    private function storeMapping(string $oldUuid, string $oldTable, string $newTable, int $newId, ?string $newUuid = null): void
+    private function storeMapping(string $oldId, string $oldTable, string $newTable, int $newId, ?string $newUuid = null): void
     {
         if ($this->dryRun) return;
 
         DB::table('uuid_mappings')->insertOrIgnore([
-            'old_uuid' => $oldUuid,
+            'old_uuid' => $oldId,
             'old_table' => $oldTable,
             'new_table' => $newTable,
             'new_id' => $newId,
@@ -231,159 +243,150 @@ class MigrateData extends Command
     }
 
     // ═══════════════════════════════════════════════════
-    // Step 1: Users (profiles + children + parents → users + parent_child)
+    // Step 1: Users (profiles JOIN users → new users)
     // ═══════════════════════════════════════════════════
 
     private function migrateUsers(): void
     {
         $old = DB::connection('old_pgsql');
 
-        // 1a. Migrate profiles → users
-        $profiles = $old->table('profiles')->get();
-        $this->info("  Found {$profiles->count()} profiles");
+        // Join profiles with users to get email + password
+        $profiles = $old->table('profiles')
+            ->join('users', 'profiles.user_id', '=', 'users.id')
+            ->select(
+                'profiles.id as profile_id',
+                'profiles.user_id',
+                'profiles.role',
+                'profiles.first_name',
+                'profiles.last_name',
+                'profiles.display_name',
+                'profiles.date_of_birth',
+                'profiles.school_level',
+                'profiles.avatar_url',
+                'profiles.status',
+                'profiles.xp',
+                'profiles.level',
+                'profiles.streak_days',
+                'profiles.total_cards_reviewed',
+                'profiles.total_decks_created',
+                'profiles.profile_type',
+                'profiles.created_at as profile_created_at',
+                'profiles.updated_at as profile_updated_at',
+                'users.id as old_user_id',
+                'users.name as user_name',
+                'users.email',
+                'users.password',
+                'users.email_verified_at',
+                'users.created_at as user_created_at',
+            )
+            ->get();
 
-        foreach ($profiles as $profile) {
+        $this->info("  Found {$profiles->count()} profiles (joined with users)");
+
+        $skipped = 0;
+        foreach ($profiles as $p) {
+            // Skip if email already exists in new DB (e.g., the seeded super admin)
+            $existingUser = DB::table('users')->where('email', $p->email)->first();
+            if ($existingUser) {
+                $this->profileToUserMap[$p->profile_id] = $existingUser->id;
+                $this->oldUserToNewMap[$p->old_user_id] = $existingUser->id;
+                $this->storeMapping($p->profile_id, 'profiles', 'users', $existingUser->id, $existingUser->uuid ?? null);
+                $skipped++;
+                continue;
+            }
+
+            // Map role
             $roleMap = [
                 'admin' => UserRole::SuperAdmin,
                 'moderator' => UserRole::Admin,
                 'user' => UserRole::Learner,
+                'learner' => UserRole::Learner,
                 'child' => UserRole::Child,
                 'parent' => UserRole::Parent,
+                'adult' => UserRole::Learner,
             ];
+            $role = $roleMap[$p->role] ?? UserRole::Learner;
 
-            $role = $roleMap[$profile->role] ?? UserRole::Learner;
+            // Build full name
+            $name = trim(($p->first_name ?? '') . ' ' . ($p->last_name ?? ''));
+            if (empty($name)) {
+                $name = $p->display_name ?? $p->user_name ?? 'User';
+            }
+
             $newUuid = Str::uuid()->toString();
 
             $data = [
                 'uuid' => $newUuid,
-                'name' => $profile->full_name ?? 'User',
-                'email' => $profile->email,
-                'password' => $profile->password_hash ?? null,
+                'name' => $name,
+                'email' => $p->email,
+                'password' => $p->password, // Already hashed from old users table
                 'role' => $role->value,
-                'is_active' => ($profile->status ?? 'active') === 'active',
-                'locale' => $profile->language ?? 'en',
+                'is_active' => ($p->status ?? 'active') === 'active',
+                'locale' => 'en',
                 'timezone' => 'UTC',
-                'avatar_path' => $profile->avatar_url,
-                'date_of_birth' => $profile->date_of_birth,
-                'school_level' => $profile->school_level,
+                'avatar_path' => $p->avatar_url,
+                'date_of_birth' => $p->date_of_birth,
+                'school_level' => $p->school_level,
                 'google_id' => null,
                 'apple_user_id' => null,
-                'email_verified_at' => $profile->created_at, // Assume verified
-                'created_at' => $profile->created_at,
-                'updated_at' => $profile->updated_at,
+                'email_verified_at' => $p->email_verified_at ?? $p->user_created_at,
+                'created_at' => $p->profile_created_at ?? $p->user_created_at,
+                'updated_at' => $p->profile_updated_at ?? $p->user_created_at,
             ];
 
-            // Extract Firebase UID for potential Google link
-            if ($profile->firebase_uid) {
-                $data['google_id'] = $profile->firebase_uid;
-            }
-
             if ($this->dryRun) {
-                $this->line("    [DRY] Would insert user: {$profile->email} ({$role->value})");
+                $this->line("    [DRY] Would insert user: {$p->email} ({$role->value})");
+                $this->profileToUserMap[$p->profile_id] = 0;
+                $this->oldUserToNewMap[$p->old_user_id] = 0;
                 continue;
             }
 
             $newId = DB::table('users')->insertGetId($data);
-            $this->userMap[$profile->id] = $newId;
-            $this->storeMapping($profile->id, 'profiles', 'users', $newId, $newUuid);
+            $this->profileToUserMap[$p->profile_id] = $newId;
+            $this->oldUserToNewMap[$p->old_user_id] = $newId;
+            $this->storeMapping($p->profile_id, 'profiles', 'users', $newId, $newUuid);
         }
 
-        // 1b. Migrate children table → update existing users or create new
-        $children = $old->table('children')->get();
-        $this->info("  Found {$children->count()} children records");
-
-        foreach ($children as $child) {
-            // children.user_id references profiles.id
-            if (isset($this->userMap[$child->user_id])) {
-                // This child already exists as a user via profiles, store child mapping
-                $this->childMap[$child->id] = $this->userMap[$child->user_id];
-                $this->storeMapping($child->id, 'children', 'users', $this->userMap[$child->user_id]);
-
-                // Update the user with child-specific data if needed
-                if (!$this->dryRun) {
-                    DB::table('users')
-                        ->where('id', $this->userMap[$child->user_id])
-                        ->update([
-                            'name' => $child->name ?: DB::raw('name'),
-                            'school_level' => $child->level ?? $child->school_level ?? null,
-                            'date_of_birth' => $child->date_of_birth ?? null,
-                            'role' => UserRole::Child->value,
-                        ]);
-                }
-            }
-        }
-
-        // 1c. Migrate parents table → store parent references
-        $parents = $old->table('parents')->get();
-        $this->info("  Found {$parents->count()} parent records");
-
-        foreach ($parents as $parent) {
-            if (isset($this->userMap[$parent->user_id])) {
-                $this->parentMap[$parent->id] = $this->userMap[$parent->user_id];
-                $this->storeMapping($parent->id, 'parents', 'users', $this->userMap[$parent->user_id]);
-
-                // Update role to parent
-                if (!$this->dryRun) {
-                    DB::table('users')
-                        ->where('id', $this->userMap[$parent->user_id])
-                        ->update(['role' => UserRole::Parent->value]);
-                }
-            }
-        }
-
-        // 1d. Migrate parent_child_links → parent_child
-        $links = $old->table('parent_child_links')->get();
-        $this->info("  Found {$links->count()} parent-child links");
-
-        foreach ($links as $link) {
-            $parentUserId = $this->parentMap[$link->parent_id] ?? null;
-            $childUserId = $this->childMap[$link->child_id] ?? null;
-
-            if ($parentUserId && $childUserId && !$this->dryRun) {
-                DB::table('parent_child')->insertOrIgnore([
-                    'parent_id' => $parentUserId,
-                    'child_id' => $childUserId,
-                    'relationship' => $link->relation ?? 'parent',
-                    'created_at' => $link->created_at,
-                ]);
-            }
-        }
-
-        $this->info("  ✓ Users migrated: " . count($this->userMap));
+        $migrated = count($this->profileToUserMap);
+        $this->info("  ✓ Users migrated: {$migrated} (skipped {$skipped} existing)");
     }
 
     // ═══════════════════════════════════════════════════
-    // Step 2: Decks (decks → decks, with visibility mapping)
+    // Step 2: Decks
     // ═══════════════════════════════════════════════════
 
     private function migrateDecks(): void
     {
         $old = DB::connection('old_pgsql');
 
-        // 2a. Migrate categories (if any exist as distinct table)
-        $this->migrateCategoriesIfExist($old);
+        // First migrate library_categories → categories
+        $this->migrateLibraryCategories($old);
 
-        // 2b. Migrate decks
+        // Migrate user decks
         $decks = $old->table('decks')->get();
-        $this->info("  Found {$decks->count()} decks");
+        $this->info("  Found {$decks->count()} user decks");
 
         foreach ($decks as $deck) {
-            $authorId = $this->userMap[$deck->author_id] ?? null;
-            if (!$authorId) {
-                $this->warn("    Skipping deck '{$deck->title}': author not found ({$deck->author_id})");
+            // deck.profile_id references profiles.id
+            $userId = $this->profileToUserMap[$deck->profile_id] ?? null;
+            if (!$userId) {
+                $this->warn("    Skipping deck '{$deck->title}': profile not found ({$deck->profile_id})");
                 continue;
             }
 
-            // Map old visibility
+            // Map visibility
             $visibility = 'private';
-            if ($deck->is_public ?? false) {
+            if (!empty($deck->visibility)) {
+                $visibility = match ($deck->visibility) {
+                    'public' => 'public',
+                    'library' => 'library',
+                    default => 'private',
+                };
+            } elseif ($deck->is_public ?? false) {
                 $visibility = 'public';
             }
-            if (($deck->status ?? '') === 'archived') {
-                $visibility = 'private';
-            }
 
-            // Map old category string to category_id
+            // Map category string → category_id
             $categoryId = null;
             if (!empty($deck->category)) {
                 $categoryId = $this->findOrCreateCategory($deck->category);
@@ -393,17 +396,19 @@ class MigrateData extends Command
 
             $data = [
                 'uuid' => $newUuid,
-                'user_id' => $authorId,
+                'user_id' => $userId,
                 'title' => $deck->title,
                 'description' => $deck->description,
                 'category_id' => $categoryId,
-                'language' => $this->mapLanguage($deck->language ?? 'Français'),
+                'language' => $this->mapLanguage($deck->language ?? 'en'),
                 'difficulty' => $deck->difficulty ?? 'beginner',
                 'visibility' => $visibility,
                 'cover_image_path' => $deck->cover_image_url,
-                'is_featured' => false,
-                'cards_count' => 0, // Will be recalculated
-                'is_ai_generated' => false,
+                'is_featured' => $deck->is_featured ?? false,
+                'cards_count' => 0, // Recalculated after cards migration
+                'average_rating' => $deck->average_rating ?? 0,
+                'ratings_count' => $deck->ratings_count ?? 0,
+                'is_ai_generated' => $deck->is_ai_generated ?? false,
                 'created_at' => $deck->created_at,
                 'updated_at' => $deck->updated_at,
             ];
@@ -418,68 +423,129 @@ class MigrateData extends Command
             $this->storeMapping($deck->id, 'decks', 'decks', $newId, $newUuid);
         }
 
-        // 2c. Migrate library folders → folders
+        // Migrate library_decks → decks with visibility='library'
+        $this->migrateLibraryDecks($old);
+
+        // Migrate folders and deck assignments
         $this->migrateFolders($old);
 
-        // 2d. Migrate deck_favorites
+        // Migrate deck favorites
         $this->migrateDeckFavorites($old);
 
         $this->info("  ✓ Decks migrated: " . count($this->deckMap));
     }
 
-    private function migrateCategoriesIfExist($old): void
+    private function migrateLibraryCategories($old): void
     {
         try {
-            // Check if categories table exists in old DB
-            $cats = $old->table('information_schema.tables')
-                ->where('table_schema', 'public')
-                ->where('table_name', 'categories')
-                ->exists();
+            $cats = $old->table('library_categories')->get();
+            $this->info("  Found {$cats->count()} library categories");
 
-            if ($cats) {
-                $categories = $old->table('categories')->get();
-                foreach ($categories as $cat) {
-                    $newId = DB::table('categories')->insertGetId([
-                        'slug' => Str::slug($cat->name ?? $cat->slug ?? 'category'),
-                        'parent_id' => null,
-                        'icon' => $cat->icon ?? null,
-                        'sort_order' => $cat->sort_order ?? 0,
-                        'is_active' => true,
-                    ]);
-                    $this->categoryMap[$cat->id] = $newId;
-                    $this->storeMapping($cat->id, 'categories', 'categories', $newId);
+            foreach ($cats as $cat) {
+                if ($this->dryRun) continue;
+
+                $slug = Str::slug($cat->name ?? 'category-' . $cat->id);
+
+                // Avoid duplicate slugs
+                $existing = DB::table('categories')->where('slug', $slug)->first();
+                if ($existing) {
+                    $this->categoryMap[$slug] = $existing->id;
+                    continue;
                 }
-                $this->info("    Migrated {$categories->count()} categories");
+
+                $newId = DB::table('categories')->insertGetId([
+                    'slug' => $slug,
+                    'parent_id' => null,
+                    'icon' => $cat->icon ?? null,
+                    'sort_order' => $cat->sort_order ?? 0,
+                    'is_active' => true,
+                ]);
+                $this->categoryMap[$slug] = $newId;
             }
+
+            $this->info("    Categories migrated: " . count($this->categoryMap));
         } catch (\Exception $e) {
-            // No categories table, that's fine
+            $this->warn("    Categories migration skipped: " . $e->getMessage());
         }
     }
 
-    private function findOrCreateCategory(string $name): int
+    private function migrateLibraryDecks($old): void
+    {
+        try {
+            $libraryDecks = $old->table('library_decks')->get();
+            $this->info("  Found {$libraryDecks->count()} library decks");
+
+            // We need a user to own these — use the super admin
+            $superAdmin = DB::table('users')->where('role', 'super_admin')->first();
+            $ownerId = $superAdmin ? $superAdmin->id : 1;
+
+            foreach ($libraryDecks as $deck) {
+                if ($this->dryRun) continue;
+
+                $newUuid = Str::uuid()->toString();
+
+                // Find category if available
+                $categoryId = null;
+                if (isset($deck->category_id)) {
+                    $slug = Str::slug($deck->category_id);
+                    $categoryId = $this->categoryMap[$slug] ?? null;
+                }
+
+                $newId = DB::table('decks')->insertGetId([
+                    'uuid' => $newUuid,
+                    'user_id' => $ownerId,
+                    'title' => $deck->title,
+                    'description' => $deck->description ?? null,
+                    'category_id' => $categoryId,
+                    'language' => $this->mapLanguage($deck->language ?? 'en'),
+                    'difficulty' => $deck->difficulty ?? 'beginner',
+                    'visibility' => 'library',
+                    'cover_image_path' => $deck->cover_image_url ?? null,
+                    'is_featured' => $deck->is_featured ?? false,
+                    'cards_count' => 0,
+                    'is_ai_generated' => false,
+                    'created_at' => $deck->created_at,
+                    'updated_at' => $deck->updated_at,
+                ]);
+                $this->deckMap['lib_' . $deck->id] = $newId;
+                $this->storeMapping('lib_' . $deck->id, 'library_decks', 'decks', $newId, $newUuid);
+            }
+        } catch (\Exception $e) {
+            $this->warn("    Library decks migration skipped: " . $e->getMessage());
+        }
+    }
+
+    private function findOrCreateCategory(string $name): ?int
     {
         $slug = Str::slug($name);
+        if (empty($slug)) return null;
 
-        // Check if we already have this category
+        if (isset($this->categoryMap[$slug])) {
+            return $this->categoryMap[$slug];
+        }
+
         $existing = DB::table('categories')->where('slug', $slug)->first();
         if ($existing) {
+            $this->categoryMap[$slug] = $existing->id;
             return $existing->id;
         }
 
-        if ($this->dryRun) return 0;
+        if ($this->dryRun) return null;
 
-        return DB::table('categories')->insertGetId([
+        $newId = DB::table('categories')->insertGetId([
             'slug' => $slug,
             'parent_id' => null,
             'icon' => null,
             'sort_order' => 0,
             'is_active' => true,
         ]);
+        $this->categoryMap[$slug] = $newId;
+        return $newId;
     }
 
     private function mapLanguage(string $language): string
     {
-        return match (strtolower($language)) {
+        return match (strtolower(trim($language))) {
             'français', 'french', 'fr' => 'fr',
             'english', 'en' => 'en',
             'arabic', 'ar', 'arabe' => 'ar',
@@ -491,10 +557,17 @@ class MigrateData extends Command
     private function migrateFolders($old): void
     {
         try {
-            $folders = $old->table('library_folders')->get();
+            $folders = $old->table('folders')->get();
+            $this->info("  Found {$folders->count()} folders");
 
             foreach ($folders as $folder) {
-                $userId = $this->userMap[$folder->user_id] ?? null;
+                // folders might use profile_id or user_id
+                $userId = null;
+                if (isset($folder->profile_id)) {
+                    $userId = $this->profileToUserMap[$folder->profile_id] ?? null;
+                } elseif (isset($folder->user_id)) {
+                    $userId = $this->oldUserToNewMap[$folder->user_id] ?? null;
+                }
                 if (!$userId || $this->dryRun) continue;
 
                 $newId = DB::table('folders')->insertGetId([
@@ -502,42 +575,40 @@ class MigrateData extends Command
                     'name' => $folder->name,
                     'color' => $folder->color ?? '#6366f1',
                     'icon' => $folder->icon ?? '📚',
-                    'parent_id' => null, // Will update after all folders
+                    'parent_id' => null,
                     'sort_order' => $folder->sort_order ?? 0,
                     'created_at' => $folder->created_at,
                     'updated_at' => $folder->updated_at,
                 ]);
                 $this->folderMap[$folder->id] = $newId;
-                $this->storeMapping($folder->id, 'library_folders', 'folders', $newId);
             }
 
-            // Update parent_id for nested folders
-            foreach ($folders as $folder) {
-                if ($folder->parent_id && isset($this->folderMap[$folder->parent_id]) && isset($this->folderMap[$folder->id])) {
-                    DB::table('folders')
-                        ->where('id', $this->folderMap[$folder->id])
-                        ->update(['parent_id' => $this->folderMap[$folder->parent_id]]);
-                }
-            }
-
-            // Migrate deck-folder assignments
+            // Migrate deck_folder_assignments
             $assignments = $old->table('deck_folder_assignments')->get();
+            $assignCount = 0;
             foreach ($assignments as $a) {
                 $deckId = $this->deckMap[$a->deck_id] ?? null;
-                $folderId = $this->folderMap[$a->folder_id ?? ''] ?? null;
-                $userId = $this->userMap[$a->user_id] ?? null;
+                $folderId = $this->folderMap[$a->folder_id] ?? null;
 
-                if ($deckId && $userId) {
+                // Try to find user from the deck
+                $userId = null;
+                if ($deckId) {
+                    $deck = DB::table('decks')->where('id', $deckId)->first();
+                    $userId = $deck?->user_id;
+                }
+
+                if ($deckId && $folderId && $userId && !$this->dryRun) {
                     DB::table('deck_folder')->insertOrIgnore([
                         'deck_id' => $deckId,
                         'folder_id' => $folderId,
                         'user_id' => $userId,
                         'sort_order' => $a->sort_order ?? 0,
                     ]);
+                    $assignCount++;
                 }
             }
 
-            $this->info("    Migrated " . count($this->folderMap) . " folders");
+            $this->info("    Folders: " . count($this->folderMap) . ", assignments: {$assignCount}");
         } catch (\Exception $e) {
             $this->warn("    Folders migration skipped: " . $e->getMessage());
         }
@@ -550,20 +621,26 @@ class MigrateData extends Command
             $count = 0;
 
             foreach ($favs as $fav) {
-                $userId = $this->userMap[$fav->user_id] ?? null;
+                // deck_favorites might use profile_id or user_id
+                $userId = null;
+                if (isset($fav->profile_id)) {
+                    $userId = $this->profileToUserMap[$fav->profile_id] ?? null;
+                } elseif (isset($fav->user_id)) {
+                    $userId = $this->oldUserToNewMap[$fav->user_id] ?? null;
+                }
                 $deckId = $this->deckMap[$fav->deck_id] ?? null;
 
                 if ($userId && $deckId && !$this->dryRun) {
                     DB::table('deck_favorites')->insertOrIgnore([
                         'user_id' => $userId,
                         'deck_id' => $deckId,
-                        'created_at' => $fav->favorited_at ?? $fav->created_at ?? now(),
+                        'created_at' => $fav->created_at ?? now(),
                     ]);
                     $count++;
                 }
             }
 
-            $this->info("    Migrated {$count} deck favorites");
+            $this->info("    Deck favorites: {$count}");
         } catch (\Exception $e) {
             $this->warn("    Deck favorites migration skipped: " . $e->getMessage());
         }
@@ -576,6 +653,8 @@ class MigrateData extends Command
     private function migrateCards(): void
     {
         $old = DB::connection('old_pgsql');
+
+        // Migrate user deck cards
         $cards = $old->table('cards')->get();
         $this->info("  Found {$cards->count()} cards");
 
@@ -588,34 +667,51 @@ class MigrateData extends Command
 
             $newUuid = Str::uuid()->toString();
 
+            // Detect MCQ from mcq_options column
+            $isMcq = false;
+            $mcqQuestion = null;
+            if (!empty($card->mcq_options)) {
+                $isMcq = true;
+                $mcqQuestion = $card->question; // The question is the MCQ question
+            }
+
             $data = [
                 'uuid' => $newUuid,
                 'deck_id' => $deckId,
-                'front_text' => $card->front_text,
-                'back_text' => $card->back_text,
-                'front_image_url' => $card->front_image_url,
-                'back_image_url' => $card->back_image_url,
-                'front_audio_url' => $card->front_audio_url ?? $card->audio_url,
-                'back_audio_url' => $card->back_audio_url,
-                'hint' => null,
-                'explanation' => null,
-                'position' => $card->order_index ?? 0,
-                'is_mcq' => false,
+                'front_text' => $card->question ?? '',
+                'back_text' => $card->answer ?? '',
+                'front_image_url' => $card->question_image_url,
+                'back_image_url' => $card->answer_image_url,
+                'front_audio_url' => $card->question_audio_url,
+                'back_audio_url' => $card->answer_audio_url,
+                'hint' => $card->hint,
+                'explanation' => $card->explanation,
+                'position' => $card->position ?? 0,
+                'is_mcq' => $isMcq,
+                'mcq_question' => $mcqQuestion,
                 'created_at' => $card->created_at,
                 'updated_at' => $card->updated_at,
             ];
 
             if ($this->dryRun) {
-                $this->line("    [DRY] Would insert card: " . Str::limit($card->front_text, 40));
+                $this->line("    [DRY] Would insert card: " . Str::limit($card->question ?? '', 40));
                 continue;
             }
 
             $newId = DB::table('cards')->insertGetId($data);
             $this->cardMap[$card->id] = $newId;
             $this->storeMapping($card->id, 'cards', 'cards', $newId, $newUuid);
+
+            // Migrate MCQ options if present
+            if ($isMcq && !empty($card->mcq_options)) {
+                $this->migrateMcqOptions($card, $newId);
+            }
         }
 
-        // Update cards_count on decks
+        // Migrate library_cards
+        $this->migrateLibraryCards($old);
+
+        // Recalculate cards_count on all decks
         if (!$this->dryRun) {
             DB::statement("
                 UPDATE decks SET cards_count = (
@@ -627,35 +723,94 @@ class MigrateData extends Command
         $this->info("  ✓ Cards migrated: " . count($this->cardMap));
     }
 
+    private function migrateMcqOptions($card, int $newCardId): void
+    {
+        $options = is_string($card->mcq_options) ? json_decode($card->mcq_options, true) : $card->mcq_options;
+        if (!is_array($options)) return;
+
+        foreach ($options as $index => $option) {
+            $optionText = is_string($option) ? $option : ($option['text'] ?? $option['option'] ?? '');
+
+            DB::table('mcq_options')->insert([
+                'card_id' => $newCardId,
+                'option_text' => $optionText,
+                'option_image_url' => null,
+                'is_correct' => $index === ($card->mcq_correct_index ?? 0),
+                'position' => $index,
+            ]);
+        }
+    }
+
+    private function migrateLibraryCards($old): void
+    {
+        try {
+            $cards = $old->table('library_cards')->get();
+            $this->info("  Found {$cards->count()} library cards");
+
+            foreach ($cards as $card) {
+                $deckId = $this->deckMap['lib_' . $card->deck_id] ?? null;
+                if (!$deckId || $this->dryRun) continue;
+
+                $newUuid = Str::uuid()->toString();
+
+                // library_cards may have different column names
+                $frontText = $card->question ?? $card->front_text ?? '';
+                $backText = $card->answer ?? $card->back_text ?? '';
+
+                $newId = DB::table('cards')->insertGetId([
+                    'uuid' => $newUuid,
+                    'deck_id' => $deckId,
+                    'front_text' => $frontText,
+                    'back_text' => $backText,
+                    'front_image_url' => $card->question_image_url ?? $card->image_url ?? null,
+                    'back_image_url' => $card->answer_image_url ?? null,
+                    'front_audio_url' => $card->audio_url ?? null,
+                    'back_audio_url' => null,
+                    'hint' => $card->hint ?? null,
+                    'explanation' => $card->explanation ?? null,
+                    'position' => $card->position ?? $card->order_index ?? 0,
+                    'is_mcq' => false,
+                    'created_at' => $card->created_at,
+                    'updated_at' => $card->updated_at,
+                ]);
+                $this->cardMap['lib_' . $card->id] = $newId;
+            }
+        } catch (\Exception $e) {
+            $this->warn("    Library cards migration skipped: " . $e->getMessage());
+        }
+    }
+
     // ═══════════════════════════════════════════════════
-    // Step 4: Progress → card_progress
+    // Step 4: Progress (card_reviews → card_progress)
     // ═══════════════════════════════════════════════════
 
     private function migrateProgress(): void
     {
         $old = DB::connection('old_pgsql');
-        $progressRows = $old->table('progress')->get();
-        $this->info("  Found {$progressRows->count()} progress records");
+
+        $reviews = $old->table('card_reviews')->get();
+        $this->info("  Found {$reviews->count()} card review records");
 
         $count = 0;
-        foreach ($progressRows as $p) {
-            $userId = $this->userMap[$p->user_id] ?? null;
-            $cardId = $this->cardMap[$p->card_id] ?? null;
+        foreach ($reviews as $r) {
+            // card_reviews.profile_id → profileToUserMap
+            $userId = $this->profileToUserMap[$r->profile_id] ?? null;
+            $cardId = $this->cardMap[$r->card_id] ?? null;
 
             if (!$userId || !$cardId) continue;
 
             $data = [
                 'user_id' => $userId,
                 'card_id' => $cardId,
-                'easiness_factor' => max(1.30, $p->ease_factor ?? 2.50),
-                'interval_days' => max(0, $p->interval ?? 0),
-                'repetitions' => max(0, $p->repetitions ?? 0),
-                'next_review_at' => $p->next_review_at,
-                'last_reviewed_at' => $p->last_reviewed_at,
-                'total_reviews' => $p->repetitions ?? 0,
-                'correct_reviews' => 0, // Not tracked in old schema
-                'created_at' => $p->created_at,
-                'updated_at' => $p->updated_at,
+                'easiness_factor' => max(1.30, $r->easiness ?? 2.50),
+                'interval_days' => max(0, $r->interval ?? 0),
+                'repetitions' => max(0, $r->repetitions ?? 0),
+                'next_review_at' => $r->next_review_at,
+                'last_reviewed_at' => $r->reviewed_at ?? $r->created_at,
+                'total_reviews' => $r->total_reviews ?? 0,
+                'correct_reviews' => $r->correct_reviews ?? 0,
+                'created_at' => $r->created_at,
+                'updated_at' => $r->updated_at,
             ];
 
             if ($this->dryRun) {
@@ -667,7 +822,50 @@ class MigrateData extends Command
             $count++;
         }
 
+        // Also migrate library_user_card_progress if it exists
+        $this->migrateLibraryProgress($old);
+
         $this->info("  ✓ Progress records migrated: {$count}");
+    }
+
+    private function migrateLibraryProgress($old): void
+    {
+        try {
+            $progress = $old->table('library_user_card_progress')->get();
+            $this->info("  Found {$progress->count()} library progress records");
+
+            $count = 0;
+            foreach ($progress as $p) {
+                $userId = null;
+                if (isset($p->profile_id)) {
+                    $userId = $this->profileToUserMap[$p->profile_id] ?? null;
+                } elseif (isset($p->user_id)) {
+                    $userId = $this->oldUserToNewMap[$p->user_id] ?? null;
+                }
+                $cardId = $this->cardMap['lib_' . ($p->card_id ?? '')] ?? null;
+
+                if (!$userId || !$cardId || $this->dryRun) continue;
+
+                DB::table('card_progress')->insertOrIgnore([
+                    'user_id' => $userId,
+                    'card_id' => $cardId,
+                    'easiness_factor' => max(1.30, $p->easiness_factor ?? $p->easiness ?? 2.50),
+                    'interval_days' => max(0, $p->interval ?? 0),
+                    'repetitions' => max(0, $p->repetitions ?? 0),
+                    'next_review_at' => $p->next_review_at ?? now(),
+                    'last_reviewed_at' => $p->last_reviewed_at ?? $p->updated_at,
+                    'total_reviews' => $p->total_reviews ?? 0,
+                    'correct_reviews' => $p->correct_reviews ?? 0,
+                    'created_at' => $p->created_at,
+                    'updated_at' => $p->updated_at,
+                ]);
+                $count++;
+            }
+
+            $this->info("    Library progress: {$count}");
+        } catch (\Exception $e) {
+            $this->warn("    Library progress migration skipped: " . $e->getMessage());
+        }
     }
 
     // ═══════════════════════════════════════════════════
@@ -685,32 +883,41 @@ class MigrateData extends Command
             foreach ($badges as $badge) {
                 if ($this->dryRun) continue;
 
+                $slug = Str::slug($badge->name ?? 'badge-' . $badge->id);
+
+                // Avoid duplicates
+                $existing = DB::table('badges')->where('slug', $slug)->first();
+                if ($existing) {
+                    $this->badgeMap[$badge->id] = $existing->id;
+                    continue;
+                }
+
                 $newId = DB::table('badges')->insertGetId([
-                    'slug' => Str::slug($badge->name),
-                    'name' => $badge->name,
-                    'description' => $badge->description,
-                    'icon' => $badge->icon_name ?? '🏆',
+                    'slug' => $slug,
+                    'name' => $badge->name ?? 'Badge',
+                    'description' => $badge->description ?? null,
+                    'icon' => $badge->icon ?? $badge->icon_name ?? '🏆',
                     'color' => $badge->color ?? '#10B981',
-                    'criteria' => null,
+                    'criteria' => isset($badge->criteria) ? (is_string($badge->criteria) ? $badge->criteria : json_encode($badge->criteria)) : null,
                 ]);
                 $this->badgeMap[$badge->id] = $newId;
-                $this->storeMapping($badge->id, 'badges', 'badges', $newId);
+                $this->storeMapping((string)$badge->id, 'badges', 'badges', $newId);
             }
 
-            // Migrate user_badges
-            $userBadges = $old->table('user_badges')->get();
+            // Migrate profile_badges → user_badges
+            $profileBadges = $old->table('profile_badges')->get();
             $ubCount = 0;
 
-            foreach ($userBadges as $ub) {
-                $userId = $this->userMap[$ub->user_id] ?? null;
-                $badgeId = $this->badgeMap[$ub->badge_id] ?? null;
+            foreach ($profileBadges as $pb) {
+                $userId = $this->profileToUserMap[$pb->profile_id] ?? null;
+                $badgeId = $this->badgeMap[$pb->badge_id] ?? null;
 
                 if ($userId && $badgeId && !$this->dryRun) {
                     DB::table('user_badges')->insertOrIgnore([
                         'user_id' => $userId,
                         'badge_id' => $badgeId,
-                        'awarded_by' => isset($ub->assigned_by) ? ($this->userMap[$ub->assigned_by] ?? null) : null,
-                        'awarded_at' => $ub->assigned_at ?? $ub->created_at,
+                        'awarded_by' => null,
+                        'awarded_at' => $pb->awarded_at ?? $pb->created_at ?? now(),
                     ]);
                     $ubCount++;
                 }
@@ -718,7 +925,7 @@ class MigrateData extends Command
 
             $this->info("  ✓ Badges migrated: " . count($this->badgeMap) . " badges, {$ubCount} awards");
         } catch (\Exception $e) {
-            $this->warn("  Badges migration skipped: " . $e->getMessage());
+            $this->warn("  Badges migration error: " . $e->getMessage());
         }
     }
 
@@ -736,24 +943,56 @@ class MigrateData extends Command
 
             $count = 0;
             foreach ($messages as $msg) {
-                $senderId = $this->userMap[$msg->sender_id] ?? null;
-                $receiverId = $this->userMap[$msg->receiver_id] ?? null;
+                // Messages may reference profile IDs or user IDs
+                $senderId = $this->profileToUserMap[$msg->sender_id] ?? ($this->oldUserToNewMap[$msg->sender_id] ?? null);
+                $receiverId = $this->profileToUserMap[$msg->receiver_id] ?? ($this->oldUserToNewMap[$msg->receiver_id] ?? null);
 
                 if (!$senderId || !$receiverId || $this->dryRun) continue;
 
                 DB::table('messages')->insert([
                     'sender_id' => $senderId,
                     'receiver_id' => $receiverId,
-                    'content' => $msg->content,
+                    'content' => $msg->content ?? $msg->message ?? '',
                     'is_read' => $msg->is_read ?? false,
                     'created_at' => $msg->created_at,
                 ]);
                 $count++;
             }
 
+            // Also migrate notifications
+            $this->migrateNotifications($old);
+
             $this->info("  ✓ Messages migrated: {$count}");
         } catch (\Exception $e) {
-            $this->warn("  Messages migration skipped: " . $e->getMessage());
+            $this->warn("  Messages migration error: " . $e->getMessage());
+        }
+    }
+
+    private function migrateNotifications($old): void
+    {
+        try {
+            $notifs = $old->table('notifications')->get();
+            $count = 0;
+
+            foreach ($notifs as $n) {
+                $userId = $this->profileToUserMap[$n->profile_id ?? ''] ?? ($this->oldUserToNewMap[$n->user_id ?? 0] ?? null);
+                if (!$userId || $this->dryRun) continue;
+
+                DB::table('notifications')->insert([
+                    'user_id' => $userId,
+                    'title' => $n->title ?? 'Notification',
+                    'message' => $n->message ?? $n->body ?? '',
+                    'type' => $n->type ?? 'system',
+                    'data' => isset($n->data) ? (is_string($n->data) ? $n->data : json_encode($n->data)) : null,
+                    'read_at' => $n->read_at,
+                    'created_at' => $n->created_at,
+                ]);
+                $count++;
+            }
+
+            $this->info("    Notifications: {$count}");
+        } catch (\Exception $e) {
+            $this->warn("    Notifications migration skipped: " . $e->getMessage());
         }
     }
 
@@ -771,61 +1010,39 @@ class MigrateData extends Command
 
             $count = 0;
             foreach ($logs as $log) {
-                // activity_logs.child_id references children.id → userMap via childMap
-                $userId = $this->childMap[$log->child_id] ?? null;
+                // activity_logs likely uses profile_id
+                $userId = null;
+                if (isset($log->profile_id)) {
+                    $userId = $this->profileToUserMap[$log->profile_id] ?? null;
+                } elseif (isset($log->user_id)) {
+                    $userId = $this->oldUserToNewMap[$log->user_id] ?? null;
+                } elseif (isset($log->child_id)) {
+                    $userId = $this->profileToUserMap[$log->child_id] ?? null;
+                }
+
                 if (!$userId || $this->dryRun) continue;
 
-                $deckId = isset($log->deck_id) ? ($this->deckMap[$log->deck_id] ?? null) : null;
+                $deckId = null;
+                if (isset($log->deck_id)) {
+                    $deckId = $this->deckMap[$log->deck_id] ?? null;
+                }
 
                 DB::table('activity_logs')->insert([
                     'user_id' => $userId,
-                    'activity_type' => $log->activity_type ?? 'study',
+                    'activity_type' => $log->activity_type ?? $log->type ?? 'study',
                     'deck_id' => $deckId,
-                    'metadata' => is_string($log->metadata) ? $log->metadata : json_encode($log->metadata),
-                    'duration_minutes' => $log->duration_minutes,
-                    'cards_reviewed' => $log->cards_reviewed,
-                    'success_rate' => $log->success_rate,
+                    'metadata' => isset($log->metadata) ? (is_string($log->metadata) ? $log->metadata : json_encode($log->metadata)) : null,
+                    'duration_minutes' => $log->duration_minutes ?? $log->duration ?? null,
+                    'cards_reviewed' => $log->cards_reviewed ?? null,
+                    'success_rate' => $log->success_rate ?? null,
                     'created_at' => $log->created_at,
                 ]);
                 $count++;
             }
 
-            // Also migrate audit_logs
-            $this->migrateAuditLogs($old);
-
             $this->info("  ✓ Activity logs migrated: {$count}");
         } catch (\Exception $e) {
-            $this->warn("  Activity logs migration skipped: " . $e->getMessage());
-        }
-    }
-
-    private function migrateAuditLogs($old): void
-    {
-        try {
-            $audits = $old->table('audit_logs')->get();
-            $count = 0;
-
-            foreach ($audits as $audit) {
-                $userId = $this->userMap[$audit->user_id] ?? null;
-                if (!$userId || $this->dryRun) continue;
-
-                DB::table('audit_logs')->insert([
-                    'user_id' => $userId,
-                    'action' => $audit->action,
-                    'target_type' => $audit->resource_type ?? '',
-                    'target_id' => 0, // UUID cannot be stored as BIGINT, use metadata
-                    'old_values' => null,
-                    'new_values' => is_string($audit->metadata) ? $audit->metadata : json_encode($audit->metadata),
-                    'ip_address' => $audit->ip_address,
-                    'user_agent' => $audit->user_agent,
-                    'created_at' => $audit->created_at,
-                ]);
-                $count++;
-            }
-
-            $this->info("    Audit logs migrated: {$count}");
-        } catch (\Exception $e) {
-            // Audit logs might not exist
+            $this->warn("  Activity logs migration error: " . $e->getMessage());
         }
     }
 
@@ -838,83 +1055,59 @@ class MigrateData extends Command
         $old = DB::connection('old_pgsql');
 
         try {
-            // Migrate subscription plans
-            $plans = $old->table('subscription_plans')->get();
-            $this->info("  Found {$plans->count()} subscription plans");
-
-            $planMap = [];
-            foreach ($plans as $plan) {
-                if ($this->dryRun) continue;
-
-                // Map old duration to slug
-                $slug = match ($plan->duration_type ?? '') {
-                    'monthly' => 'monthly',
-                    'quarterly' => 'quarterly',
-                    'semi_annual' => 'semi-annual',
-                    'annual' => 'yearly',
-                    default => Str::slug($plan->name),
-                };
-
-                $durationDays = match ($plan->duration_type ?? '') {
-                    'monthly' => 30,
-                    'quarterly' => 90,
-                    'semi_annual' => 180,
-                    'annual' => 365,
-                    default => ($plan->duration_value ?? 1) * 30,
-                };
-
-                $newId = DB::table('subscription_plans')->insertGetId([
-                    'slug' => $slug,
-                    'name' => $plan->name,
-                    'price' => $plan->price ?? 0,
-                    'currency' => $plan->currency ?? 'USD',
-                    'duration_days' => $durationDays,
-                    'apple_product_id' => null,
-                    'features' => $plan->features,
-                    'is_active' => $plan->is_active ?? true,
-                    'sort_order' => $plan->sort_order ?? 0,
-                ]);
-                $planMap[$plan->id] = $newId;
+            // Check if user_subscriptions or subscriptions table exists
+            $tableName = null;
+            foreach (['user_subscriptions', 'subscriptions'] as $t) {
+                $exists = $old->select("SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '{$t}') as e");
+                if ($exists[0]->e) {
+                    $tableName = $t;
+                    break;
+                }
             }
 
-            // Migrate user subscriptions
-            $subs = $old->table('user_subscriptions')->get();
+            if (!$tableName) {
+                $this->info("  No subscriptions table found, skipping.");
+                return;
+            }
+
+            // We already have subscription plans from the seeder. Map old plan references to new.
+            $freePlan = DB::table('subscription_plans')->where('slug', 'free')->first();
+
+            $subs = $old->table($tableName)->get();
+            $this->info("  Found {$subs->count()} subscriptions");
+
             $count = 0;
-
             foreach ($subs as $sub) {
-                $userId = $this->userMap[$sub->user_id] ?? null;
-                $planId = $planMap[$sub->plan_id] ?? null;
+                $userId = null;
+                if (isset($sub->profile_id)) {
+                    $userId = $this->profileToUserMap[$sub->profile_id] ?? null;
+                } elseif (isset($sub->user_id)) {
+                    $userId = $this->oldUserToNewMap[$sub->user_id] ?? null;
+                }
 
-                if (!$userId || !$planId || $this->dryRun) continue;
+                if (!$userId || $this->dryRun) continue;
 
-                // Map old status
-                $statusMap = [
-                    'active' => 'active',
-                    'canceled' => 'cancelled',
-                    'expired' => 'expired',
-                    'past_due' => 'expired',
-                    'trialing' => 'trial',
-                    'incomplete' => 'expired',
-                ];
+                // Default to free plan
+                $planId = $freePlan?->id ?? 1;
 
                 DB::table('subscriptions')->insert([
                     'user_id' => $userId,
                     'plan_id' => $planId,
-                    'status' => $statusMap[$sub->status] ?? 'expired',
+                    'status' => $sub->status ?? 'active',
                     'apple_transaction_id' => null,
                     'apple_original_transaction_id' => null,
-                    'current_period_start' => $sub->current_period_start,
-                    'current_period_end' => $sub->current_period_end,
-                    'cancelled_at' => $sub->canceled_at,
+                    'current_period_start' => $sub->current_period_start ?? $sub->created_at,
+                    'current_period_end' => $sub->current_period_end ?? $sub->expires_at ?? now()->addYear(),
+                    'cancelled_at' => $sub->cancelled_at ?? $sub->canceled_at ?? null,
                     'created_at' => $sub->created_at,
-                    'updated_at' => $sub->updated_at,
+                    'updated_at' => $sub->updated_at ?? $sub->created_at,
                 ]);
                 $count++;
             }
 
-            $this->info("  ✓ Subscriptions migrated: " . count($planMap) . " plans, {$count} subscriptions");
+            $this->info("  ✓ Subscriptions migrated: {$count}");
         } catch (\Exception $e) {
-            $this->warn("  Subscriptions migration skipped: " . $e->getMessage());
+            $this->warn("  Subscriptions migration error: " . $e->getMessage());
         }
     }
 
@@ -924,6 +1117,12 @@ class MigrateData extends Command
 
     private function showSummary(): void
     {
+        if ($this->dryRun) {
+            $this->newLine();
+            $this->info('DRY RUN complete — no data was written.');
+            return;
+        }
+
         $this->newLine();
         $this->info('╔══════════════════════════════════════╗');
         $this->info('║        Migration Summary             ║');
@@ -931,15 +1130,16 @@ class MigrateData extends Command
 
         $counts = [
             'Users' => DB::table('users')->count(),
-            'Parent-Child' => DB::table('parent_child')->count(),
+            'Categories' => DB::table('categories')->count(),
             'Decks' => DB::table('decks')->count(),
             'Cards' => DB::table('cards')->count(),
             'Card Progress' => DB::table('card_progress')->count(),
             'Badges' => DB::table('badges')->count(),
             'User Badges' => DB::table('user_badges')->count(),
             'Messages' => DB::table('messages')->count(),
+            'Notifications' => DB::table('notifications')->count(),
             'Activity Logs' => DB::table('activity_logs')->count(),
-            'Subscriptions' => DB::table('subscriptions')->count(),
+            'Folders' => DB::table('folders')->count(),
             'UUID Mappings' => DB::table('uuid_mappings')->count(),
         ];
 
