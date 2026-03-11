@@ -163,14 +163,9 @@ class AuthController extends Controller
 
             $user->update($updates);
         } else {
-            // New user — if no name provided, request profile completion
+            // New user — use fallback name if none provided (avoids profile completion flow)
             if (!$name) {
-                return response()->json([
-                    'requires_profile_completion' => true,
-                    'email' => $email,
-                    'firebase_uid' => $firebaseUid,
-                    'provider' => $provider,
-                ]);
+                $name = $email ? explode('@', $email)[0] : 'User';
             }
 
             $socialField = match ($provider) {
